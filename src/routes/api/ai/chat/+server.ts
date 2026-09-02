@@ -1,0 +1,2 @@
+import { json } from '@sveltejs/kit'; import { AIGateway } from '$server/ai/AIGateway';
+export const POST = async ({request}) => { const {messages=[]} = await request.json(); try { const upstream=await new AIGateway().chat(messages,false); return new Response(upstream.body,{status:upstream.status,headers:{'content-type':upstream.headers.get('content-type')||'application/json'}}); } catch(e) { return json({error:e instanceof Error?e.message:'AI unavailable'},{status:503}); } };
