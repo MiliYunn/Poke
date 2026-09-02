@@ -2,7 +2,6 @@ import { env } from '$env/dynamic/private';
 export class AIGateway {
   private baseUrl = env.GONKA_BASE_URL || 'https://api.gonkarouter.io/v1';
   readonly primaryModel = env.GONKA_MODEL || 'deepseek-ai/DeepSeek-V4-Flash-0731';
-  readonly consensusModel = env.GONKA_CONSENSUS_MODEL || '';
   async chat(messages: Array<{role: string; content: string}>, stream = false, model = this.primaryModel) {
     if (!env.GONKA_API_KEY) throw new Error('GONKA_API_KEY is not configured');
     const controller=new AbortController(); const timer=setTimeout(()=>controller.abort(),30_000);

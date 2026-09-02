@@ -1,6 +1,6 @@
-# Poké — Gonka-powered Web3 truth engine
+# Poké — Web3 command center powered by Gonka
 
-Poké is an independently implemented SvelteKit command center for public-interest Web3 verification. It combines portfolio and transaction exploration, evidence-first scam analysis, whistleblower integrity proofs, and a traceable claim-verification workflow. Blockhead was used only as a product-scope reference; no source code was copied or reused.
+Poké is an independently implemented SvelteKit Web3 command center. It combines cross-chain portfolio and explorer tools, evidence-first scam analysis, whistleblower integrity proofs, and a context-aware assistant. Blockhead was used only as a product-scope reference; no source code was copied or reused.
 
 ## Local setup
 
@@ -12,49 +12,39 @@ Never commit `.env`. The MVP targets Ethereum Sepolia, Base Sepolia, and Polygon
 
 ## GonkaRouter integration
 
-All AI requests originate on the server and pass through `src/lib/server/ai/AIGateway.ts`. Feature code never calls another AI provider. The gateway sends OpenAI-compatible requests to `https://api.gonkarouter.io/v1/chat/completions` and keeps `GONKA_API_KEY` out of browser code.
+All AI requests originate on the server and pass through `src/lib/server/ai/AIGateway.ts`. Scam Detection and Chatbot Corner do not call another AI provider. The gateway sends OpenAI-compatible requests to `https://api.gonkarouter.io/v1/chat/completions` and keeps `GONKA_API_KEY` outside browser code.
 
-The `/verify` workflow performs:
+Scam Detection shows:
 
-1. Safe retrieval of the public URLs supplied by the user.
-2. Claim extraction through the configured Gonka model.
-3. Evidence-based verification through Gonka.
-4. A 0–100 Truth Score, verdict, supporting and contradicting evidence, limitations, citations, and an auditable reasoning trace.
-5. Display of the model and Gonka response Request ID for every inference step.
+- Risk level, confidence, and likely scam type
+- Evidence and missing information
+- Separate avoidance and immediate protection guidance
+- The Gonka model and Request ID returned for the inference
 
-Set `GONKA_CONSENSUS_MODEL` to a second, different model available on your GonkaRouter account to enable independent cross-verification. Poké averages both scores and marks the result as disputed when they differ by more than 25 points. If it is not configured, the UI clearly labels the result as single-model verification.
-
-Poké never presents private model chain-of-thought. Its reasoning trace is an auditable evidence record: what was checked, what the available evidence establishes, which source was used, and what remains unknown.
+Chatbot Corner is restricted to Poké’s wallet, EVM chain, transaction, portfolio, scam-evidence, whistleblower, and Web3 safety topics. It must not infer report risk from a hash alone or invent facts that are not present on screen.
 
 ## Environment
 
 ```env
 GONKA_API_KEY=your_rotated_server_side_key
 GONKA_MODEL=deepseek-ai/DeepSeek-V4-Flash-0731
-GONKA_CONSENSUS_MODEL=another_gonka_hosted_model
 GONKA_BASE_URL=https://api.gonkarouter.io/v1
+PUBLIC_SEPOLIA_RPC_URL=https://ethereum-sepolia-rpc.publicnode.com
+PUBLIC_BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
+PUBLIC_POLYGON_AMOY_RPC_URL=https://polygon-amoy.drpc.org
+SESSION_SECRET=replace_with_at_least_32_random_characters
 ```
 
 Use a newly rotated key. Never commit `.env`, expose a key in the UI, or include one in a demo recording.
 
-## Verification API
+## Wallet sign-in
 
-`POST /api/ai/verify`
-
-```json
-{
-  "input": "A factual statement, public webpage URL, or pasted tweet text",
-  "sourceUrls": ["https://public-evidence.example/article"]
-}
-```
-
-The response contains `claims`, retrieved-source status, `result.truthScore`, evidence, reasoning trace, consensus metadata, and `runs`. Each `runs` entry contains the inference stage, Gonka model, and Request ID returned by the inference gateway.
+Wallet authentication asks MetaMask for the selected address, creates a five-minute server challenge, and requests a message signature. The signature does not send a transaction or cost gas. The server verifies it and creates a seven-day signed session. Set a strong `SESSION_SECRET` outside local development.
 
 ## Hackathon demo flow
 
-1. Open **Verify**.
-2. Paste a claim or public article URL and add any supporting or conflicting evidence links.
-3. Run verification and explain the Truth Score.
-4. Expand the evidence, uncertainty, and reasoning sections.
-5. Show the Gonka model and Request ID for each inference.
-6. If a second model is configured, show the consensus or disagreement result.
+1. Enter a wallet address and inspect balances on the three testnets.
+2. Open Explorer and inspect a block or transaction.
+3. Submit suspicious content to Scam Detection and show its evidence, safety guidance, Gonka model, and Request ID.
+4. Create a whistleblower report and hash its evidence files.
+5. Ask Chatbot Corner about information currently shown in Poké.
