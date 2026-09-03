@@ -1,3 +1,30 @@
-import {json} from '@sveltejs/kit';import {cookieOptions,unseal} from '$server/auth/session';
-type Session={wallet:string;expiresAt:number};const usage=new Map<string,{month:string;count:number}>();
-export const POST=async({cookies})=>{const session=await unseal<Session>(cookies.get('poke_session'));if(!session||session.expiresAt<Date.now())return json({error:'Wallet sign-in is required.'},{status:401});const month=new Date().toISOString().slice(0,7);const key=session.wallet.toLowerCase();const current=usage.get(key);const count=current?.month===month?current.count:0;if(count>=5)return json({error:'This signed wallet reached the monthly report limit.'},{status:429});usage.set(key,{month,count:count+1});return json({wallet:session.wallet,count:count+1,limit:5,month});};
+import { json } from '@sveltejs/kit';
+import { unseal } from '$lib/server/auth/session';
+import { consumeReportAttempt, getReportQuota } from '$lib/server/reports/quota';
+
+type Session = { wallet: string; expiresAt: number };
+
+async function authenticatedWallet(cookies: { get: (name: string) => string | undefined }) {
+  const session = await unseal<Session>(cookies.get('poke_session'));
+  return session && session.expiresAt >= Date.now() ? session.wallet : null;
+}
+
+export const GET = async ({ cookies }) => {
+  const wallet = await authenticatedWallet(cookies);
+  if (!wallet) return json({ error: 'Wallet sign-in is required.' }, { status: 401 });
+  return json(await getReportQuota(wallet));
+};
+
+export const POST = async ({ cookies }) => {
+  const wallet = await authenticatedWallet(cookies);
+  if (!wallet) return json({ error: 'Wallet sign-in is required.' }, { status: 401 });
+
+  const quota = await consumeReportAttempt(wallet);
+  if (!quota.consumed) {
+    return json(
+      { ...quota, error: `Your ${quota.plan} plan's ${quota.limit} whistleblower report attempts have been used. Upgrade your plan to submit another report.` },
+      { status: 429 }
+    );
+  }
+  return json(quota);
+};
