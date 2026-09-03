@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { extractPdfText } from '$lib/client/pdf';
 
   type Message = { role: 'user' | 'assistant'; content: string; model?: string; requestId?: string };
   type SavedReport = {
@@ -38,14 +39,17 @@
     return JSON.parse(new TextDecoder().decode(plaintext)) as SavedReport;
   }
 
-  function safeEvidence(evidence: Array<Record<string, unknown>> | undefined) {
-    return (evidence || []).map((file) => ({
-      name: file.name,
-      type: file.type,
-      size: file.size,
-      sha256: file.hash || file.sha256,
-      extractedText: typeof file.text === 'string' ? file.text.slice(0, 1200) : undefined
-    }));
+  async function safeEvidence(evidence: Array<Record<string, unknown>> | undefined) {
+    const results = [];
+    for (const file of evidence || []) {
+      let extractedText = typeof file.text === 'string' ? file.text.slice(0, 1200) : '';
+      const isPdf = file.type === 'application/pdf' || (typeof file.name === 'string' && /\.pdf$/i.test(file.name));
+      if (!extractedText && isPdf && typeof file.data === 'string') {
+        try { extractedText = (await extractPdfText(fromB64(file.data))).slice(0, 1200); } catch { /* Keep integrity metadata when parsing fails. */ }
+      }
+      results.push({ name: file.name, type: file.type, size: file.size, sha256: file.hash || file.sha256, extractedText: extractedText || undefined });
+    }
+    return results;
   }
 
   async function reportLookup(question: string, reports: SavedReport[]) {
@@ -60,7 +64,7 @@
       if (!decrypted) return `A matching encrypted report exists for ${hash}, but its session recovery key is unavailable. The report cannot be decrypted safely in this browser session.`;
       return `Authorized locally decrypted report for ${hash}: ${JSON.stringify({
         report: decrypted.report?.slice(0, 2600),
-        evidence: safeEvidence(decrypted.evidence).slice(0, 5),
+        evidence: (await safeEvidence(decrypted.evidence)).slice(0, 5),
         riskAssessment: decrypted.riskAssessment || record.riskAssessment || null
       })}. State the stored risk level when riskAssessment is present. If it is absent, provide a clearly labeled risk assessment using only this decrypted report and extracted evidence. Do not say the report is inaccessible.`;
     } catch {

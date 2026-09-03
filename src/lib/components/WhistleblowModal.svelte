@@ -2,11 +2,12 @@
   import { onMount } from 'svelte';
   import { env } from '$env/dynamic/public';
   import { encodeFunctionData, parseAbi } from 'viem';
+  import { extractPdfText } from '$lib/client/pdf';
 
   export let open = false;
 
   type User = { wallet: string; expiresAt: number };
-  type Evidence = { id: string; name: string; size: number; type: string; hash: string; data: string; text?: string };
+  type Evidence = { id: string; name: string; size: number; type: string; hash: string; data: string; text?: string; extraction: 'text' | 'no-text' | 'binary' | 'failed' };
   type Quota = { plan: 'free' | 'premium'; used: number; limit: number; remaining: number; blocked: boolean };
   type RiskAnalysis = { truthScore: number; riskLevel: string; confidence: string; scamType: string; summary: string; evidence: string[]; missingInformation: string[] };
 
@@ -26,6 +27,7 @@
   let attemptConsumed = false;
   let wasOpen = false;
   let riskAnalysis: RiskAnalysis | null = null;
+  let processingEvidence = false;
 
   const abi = parseAbi(['function attest(bytes32 reportHash, bytes32 schema)', 'function verify(bytes32 reportHash) view returns (bool)']);
   const zeroHash = `0x${'0'.repeat(64)}` as `0x${string}`;
@@ -98,6 +100,7 @@
       input.value = '';
       return;
     }
+    processingEvidence = true;
     for (const file of Array.from(input.files || []).slice(0, 5 - evidenceFiles.length)) {
       if (file.size > 10 * 1024 * 1024) {
         error = 'Each file must be 10 MB or smaller.';
@@ -105,6 +108,17 @@
       }
       const buffer = await file.arrayBuffer();
       const canReadText = file.type === 'text/plain' || file.type === 'application/json' || /\.(txt|json)$/i.test(file.name);
+      const isPdf = file.type === 'application/pdf' || /\.pdf$/i.test(file.name);
+      let extractedText = canReadText ? new TextDecoder().decode(buffer).slice(0, 12_000) : '';
+      let extraction: Evidence['extraction'] = canReadText ? (extractedText.trim() ? 'text' : 'no-text') : 'binary';
+      if (isPdf) {
+        try {
+          extractedText = await extractPdfText(buffer);
+          extraction = extractedText ? 'text' : 'no-text';
+        } catch {
+          extraction = 'failed';
+        }
+      }
       evidenceFiles = [...evidenceFiles, {
         id: crypto.randomUUID(),
         name: file.name,
@@ -112,9 +126,11 @@
         type: file.type || 'application/octet-stream',
         hash: hex(await crypto.subtle.digest('SHA-256', buffer)),
         data: b64(new Uint8Array(buffer)),
-        text: canReadText ? new TextDecoder().decode(buffer).slice(0, 12_000) : undefined
+        text: extractedText || undefined,
+        extraction
       }];
     }
+    processingEvidence = false;
     input.value = '';
     reportHash = '';
     riskAnalysis = null;
@@ -127,6 +143,13 @@
       return file.text ? `${metadata}\nExtracted attachment text:\n${file.text}` : `${metadata}\nBinary attachment: contents were not text-extracted; use as integrity metadata only.`;
     });
     return [`Whistleblower report:\n${report.trim() || '[No typed report content]'}`, attachmentEvidence.length ? `Evidence attachments:\n${attachmentEvidence.join('\n\n')}` : 'Evidence attachments: none'].join('\n\n').slice(0, 12_000);
+  }
+
+  function extractionLabel(file: Evidence) {
+    if (file.extraction === 'text') return 'Text extracted locally and included in risk analysis';
+    if (file.extraction === 'no-text') return 'No embedded text found; this may be a scanned PDF';
+    if (file.extraction === 'failed') return 'PDF text extraction failed; integrity hash is still included';
+    return 'Integrity hash included; binary content not extracted';
   }
 
   async function generate() {
@@ -295,16 +318,16 @@
           <strong>Evidence attachments</strong>
           <small>Up to 5 files · 10 MB each · hashed before storage</small>
         </div>
-        <label class="upload-button" for="evidence">+ Add files</label>
-        <input id="evidence" type="file" multiple onchange={addEvidence} disabled={quota?.blocked && !reportHash}/>
+        <label class="upload-button" for="evidence">{processingEvidence ? 'Reading file…' : '+ Add files'}</label>
+        <input id="evidence" type="file" multiple onchange={addEvidence} disabled={processingEvidence || (quota?.blocked && !reportHash)}/>
       </div>
 
       {#each evidenceFiles as file}
-        <div class="hash"><strong>{file.name}</strong><small>{file.text ? 'Text included in risk analysis' : 'Integrity hash included; binary content not extracted'}</small><code>{file.hash}</code></div>
+        <div class="hash"><strong>{file.name}</strong><small>{extractionLabel(file)}</small><code>{file.hash}</code></div>
       {/each}
 
-      <p class="quota-note">Risk analysis sends the typed report and extracted TXT/JSON evidence to GonkaRouter. Image and PDF contents remain local and contribute integrity hashes only.</p>
-      <button class="full primary" onclick={generate} disabled={(!report.trim() && !evidenceFiles.length) || busy || quota?.blocked}>
+      <p class="quota-note">Risk analysis sends the typed report and locally extracted TXT, JSON, or PDF text to GonkaRouter. Original files remain local and are encrypted before storage.</p>
+      <button class="full primary" onclick={generate} disabled={(!report.trim() && !evidenceFiles.length) || processingEvidence || busy || quota?.blocked}>
         {busy ? 'Generating commitment and assessing risk…' : 'Generate report + evidence hash · uses 1 attempt'}
       </button>
 

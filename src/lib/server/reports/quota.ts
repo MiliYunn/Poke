@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 
 export type ReportPlan = 'free' | 'premium';
 
-type UsageRecord = { count: number; updatedAt: string };
+type UsageRecord = { count: number; plan?: ReportPlan; updatedAt: string };
 type UsageDatabase = { version: 1; wallets: Record<string, UsageRecord> };
 
 const limits: Record<ReportPlan, number> = { free: 5, premium: 100 };
@@ -14,14 +14,14 @@ function databasePath() {
   return env.REPORT_USAGE_FILE?.trim() || join(process.cwd(), '.poke-data', 'report-usage.json');
 }
 
-function planFor(wallet: string): ReportPlan {
+function planFor(wallet: string, storedPlan?: ReportPlan): ReportPlan {
   const premiumWallets = new Set(
     (env.POKE_PREMIUM_WALLETS || '')
       .split(',')
       .map((value) => value.trim().toLowerCase())
       .filter(Boolean)
   );
-  return premiumWallets.has(wallet.toLowerCase()) ? 'premium' : 'free';
+  return premiumWallets.has(wallet.toLowerCase()) ? 'premium' : storedPlan || 'free';
 }
 
 async function readDatabase(): Promise<UsageDatabase> {
@@ -46,8 +46,8 @@ function serialize<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
-function status(wallet: string, count: number) {
-  const plan = planFor(wallet);
+function status(wallet: string, count: number, storedPlan?: ReportPlan) {
+  const plan = planFor(wallet, storedPlan);
   const limit = limits[plan];
   return {
     wallet,
@@ -62,7 +62,8 @@ function status(wallet: string, count: number) {
 export async function getReportQuota(wallet: string) {
   return serialize(async () => {
     const database = await readDatabase();
-    return status(wallet, database.wallets[wallet.toLowerCase()]?.count || 0);
+    const record = database.wallets[wallet.toLowerCase()];
+    return status(wallet, record?.count || 0, record?.plan);
   });
 }
 
@@ -70,13 +71,25 @@ export async function consumeReportAttempt(wallet: string) {
   return serialize(async () => {
     const database = await readDatabase();
     const key = wallet.toLowerCase();
-    const count = database.wallets[key]?.count || 0;
-    const current = status(wallet, count);
+    const record = database.wallets[key];
+    const count = record?.count || 0;
+    const current = status(wallet, count, record?.plan);
     if (current.blocked) return { ...current, consumed: false };
 
     const nextCount = count + 1;
-    database.wallets[key] = { count: nextCount, updatedAt: new Date().toISOString() };
+    database.wallets[key] = { count: nextCount, plan: current.plan, updatedAt: new Date().toISOString() };
     await writeDatabase(database);
-    return { ...status(wallet, nextCount), consumed: true };
+    return { ...status(wallet, nextCount, current.plan), consumed: true };
+  });
+}
+
+export async function setReportPlan(wallet: string, plan: ReportPlan) {
+  return serialize(async () => {
+    const database = await readDatabase();
+    const key = wallet.toLowerCase();
+    const current = database.wallets[key];
+    database.wallets[key] = { count: current?.count || 0, plan, updatedAt: new Date().toISOString() };
+    await writeDatabase(database);
+    return status(wallet, database.wallets[key].count, plan);
   });
 }
