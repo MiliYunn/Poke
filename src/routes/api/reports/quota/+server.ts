@@ -1,0 +1,3 @@
+import {json} from '@sveltejs/kit';import {cookieOptions,unseal} from '$server/auth/session';
+type Session={wallet:string;expiresAt:number};const usage=new Map<string,{month:string;count:number}>();
+export const POST=async({cookies})=>{const session=await unseal<Session>(cookies.get('poke_session'));if(!session||session.expiresAt<Date.now())return json({error:'Wallet sign-in is required.'},{status:401});const month=new Date().toISOString().slice(0,7);const key=session.wallet.toLowerCase();const current=usage.get(key);const count=current?.month===month?current.count:0;if(count>=5)return json({error:'This signed wallet reached the monthly report limit.'},{status:429});usage.set(key,{month,count:count+1});return json({wallet:session.wallet,count:count+1,limit:5,month});};
