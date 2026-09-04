@@ -13,6 +13,15 @@
   type RiskAnalysis = { truthScore: number; riskLevel: string; confidence: string; scamType: string; summary: string; evidence: string[]; missingInformation: string[] };
   type EthereumProvider = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
   type TransactionReceipt = { status?: string; contractAddress?: string };
+  type ReportHistoryRecord = {
+    hash: string;
+    owner?: string;
+    createdAt?: string;
+    encrypted?: { ciphertext: string; iv: string };
+    metadata?: { hasTypedReport: boolean; riskLevel?: string; confidence?: string; truthScore?: number; scamType?: string; evidence: Array<{ name: string; size: number; type: string; hash: string }> };
+    attestation?: { chainId: number; network: string; contract: string; transactionHash: string };
+  };
+  type HistoricalReportDetail = { report?: string; evidence?: Evidence[]; riskAssessment?: RiskAnalysis | null };
 
   let user: User | null = null;
   let report = '';
@@ -38,6 +47,10 @@
   let registryChainId = 0;
   let deploymentTxHash = '';
   let deployingRegistry = false;
+  let reportHistory: ReportHistoryRecord[] = [];
+  let selectedHistoryHash = '';
+  let historyDetail: HistoricalReportDetail | null = null;
+  let historyMessage = '';
 
   const abi = parseAbi([...pokeAttestationRegistryAbi]);
   const addressPattern = /^0x[a-fA-F0-9]{40}$/;
@@ -48,6 +61,7 @@
     for (let i = 0; i < bytes.length; i += 32768) value += String.fromCharCode(...bytes.subarray(i, i + 32768));
     return btoa(value);
   };
+  const fromB64 = (value: string) => Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 
   function syncQuota(next: Quota) {
     quota = next;
@@ -107,7 +121,36 @@
   async function refreshAndLoadQuota() {
     await refresh();
     if (user) await loadQuota();
+    loadReportHistory();
     await loadRegistryAddress().catch(() => { registryAddress = ''; });
+  }
+
+  function loadReportHistory() {
+    const records = JSON.parse(localStorage.getItem('poke-reports') || '[]') as ReportHistoryRecord[];
+    reportHistory = user ? records.filter((record) => !record.owner || record.owner.toLowerCase() === user?.wallet.toLowerCase()) : [];
+  }
+
+  async function viewHistoricalReport(record: ReportHistoryRecord) {
+    selectedHistoryHash = record.hash;
+    historyDetail = null;
+    historyMessage = '';
+    const encodedKey = sessionStorage.getItem(`poke-report-key:${record.hash}`);
+    if (!record.encrypted || !encodedKey) {
+      historyMessage = 'The encrypted report body is locked because its temporary session key is unavailable. Its safe metadata and result are still shown.';
+      return;
+    }
+    try {
+      const key = await crypto.subtle.importKey('raw', fromB64(encodedKey), { name: 'AES-GCM' }, false, ['decrypt']);
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: fromB64(record.encrypted.iv) },
+        key,
+        fromB64(record.encrypted.ciphertext)
+      );
+      historyDetail = JSON.parse(new TextDecoder().decode(plaintext)) as HistoricalReportDetail;
+      historyMessage = 'Encrypted report details unlocked locally for this browser session.';
+    } catch {
+      historyMessage = 'The saved report could not be decrypted. Its safe metadata and result are still available.';
+    }
   }
 
   function resetForm() {
@@ -277,9 +320,18 @@
         owner: user.wallet,
         encrypted: { ciphertext: encrypted.ciphertext, iv: encrypted.iv },
         createdAt: new Date().toISOString(),
+        metadata: {
+          hasTypedReport: Boolean(report.trim()),
+          riskLevel: riskAnalysis?.riskLevel,
+          confidence: riskAnalysis?.confidence,
+          truthScore: riskAnalysis?.truthScore,
+          scamType: riskAnalysis?.scamType,
+          evidence: evidenceFiles.map(({ name, size, type, hash }) => ({ name, size, type, hash }))
+        },
         quota
       };
       localStorage.setItem('poke-reports', JSON.stringify([record, ...records.filter((item) => item.hash !== reportHash)].slice(0, 30)));
+      loadReportHistory();
       saved = true;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Could not encrypt and save the report.';
@@ -362,6 +414,14 @@
       const receipt = await waitForReceipt(ethereum, txHash);
       if (!receipt) throw new Error('Attestation is still pending. Check the transaction hash in the testnet explorer.');
       if (receipt.status === '0x0') throw new Error('The attestation transaction reverted on the selected testnet.');
+      const records = JSON.parse(localStorage.getItem('poke-reports') || '[]') as ReportHistoryRecord[];
+      const attestation = { chainId: network.chainId, network: network.name, contract, transactionHash: txHash };
+      const metadata = { hasTypedReport: Boolean(report.trim()), riskLevel: riskAnalysis?.riskLevel, confidence: riskAnalysis?.confidence, truthScore: riskAnalysis?.truthScore, scamType: riskAnalysis?.scamType, evidence: evidenceFiles.map(({ name, size, type, hash }) => ({ name, size, type, hash })) };
+      const anchoredRecords = records.some((record) => record.hash === reportHash)
+        ? records.map((record) => record.hash === reportHash ? { ...record, attestation } : record)
+        : [{ hash: reportHash, owner: user.wallet, createdAt: new Date().toISOString(), metadata, attestation }, ...records].slice(0, 30);
+      localStorage.setItem('poke-reports', JSON.stringify(anchoredRecords));
+      loadReportHistory();
       disclosureStatus = `Hash anchored and confirmed on ${network.name}. Keep the transaction hash with the disclosure package.`;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Attestation transaction failed.';
@@ -452,6 +512,41 @@
           <strong>{quota.remaining} of {quota.limit} report generations left</strong>
           <a href="/plans">Manage plan</a>
         </div>
+      {/if}
+
+      {#if user}
+        <details class="history-panel report-history">
+          <summary>Saved report history <span>{reportHistory.length}</span></summary>
+          {#if reportHistory.length}
+            <div class="history-list">
+              {#each reportHistory as item}
+                <button class:active={selectedHistoryHash === item.hash} onclick={() => viewHistoricalReport(item)}>
+                  <span class={`history-risk risk-${item.metadata?.riskLevel || 'unknown'}`}>{item.metadata?.riskLevel || 'saved'}</span>
+                  <strong>{item.metadata?.scamType || 'Whistleblower report'}</strong>
+                  <small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : 'Date unavailable'} · {item.metadata?.evidence?.length || 0} evidence file(s)</small>
+                  <code>{item.hash}</code>
+                  <em>View saved result →</em>
+                </button>
+              {/each}
+            </div>
+            {#if selectedHistoryHash}
+              {@const selectedRecord = reportHistory.find((item) => item.hash === selectedHistoryHash)}
+              <section class="history-detail">
+                <p>{historyMessage}</p>
+                {#if selectedRecord?.metadata}
+                  <div class="history-stats"><strong>{selectedRecord.metadata.riskLevel || 'Unknown'} risk</strong><span>{selectedRecord.metadata.confidence || 'unknown'} confidence · truth score {selectedRecord.metadata.truthScore ?? 0}%</span></div>
+                  {#each selectedRecord.metadata.evidence || [] as file}<div class="history-evidence"><strong>{file.name}</strong><code>{file.hash}</code></div>{/each}
+                {/if}
+                {#if historyDetail}
+                  {#if historyDetail.report}<h4>Report content</h4><pre>{historyDetail.report}</pre>{/if}
+                  {#if historyDetail.riskAssessment}<h4>Saved assessment</h4><p>{historyDetail.riskAssessment.summary}</p>{/if}
+                {/if}
+              </section>
+            {/if}
+          {:else}
+            <p class="history-empty">No encrypted reports saved in this browser yet. Use “Encrypt and save off-chain” after generating a report.</p>
+          {/if}
+        </details>
       {/if}
 
       {#if quota?.blocked && !reportHash}

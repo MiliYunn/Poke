@@ -1,9 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { env } from '$env/dynamic/public';
+  import { decodeFunctionResult, encodeFunctionData, parseAbi } from 'viem';
   import AppHeader from '$components/AppHeader.svelte';
+  import { attestationNetworks, pokeAttestationRegistryAbi } from '$lib/contracts/pokeAttestationRegistry';
 
   type Interface = { name: string; description: string; url: string; kind: 'eas' | 'external' };
   type Attestation = { id: string; attester: string; recipient: string; refUID: string; revocable: boolean; revocationTime: number; expirationTime: number; data: string };
+  type PokeAttestation = { reportHash: string; submitter: string; timestamp: number; schema: string; contract: string; chainId: number; network: string; transactionHash?: string };
+  type EthereumProvider = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
 
   const interfaces: Interface[] = [
     { name: 'EAS Explorer', description: 'Inspect public Ethereum attestations.', url: 'https://sepolia.easscan.org/', kind: 'eas' },
@@ -16,6 +21,9 @@
   let error = '';
   let latest: Attestation[] = [];
   let result: Attestation | null = null;
+  let pokeResult: PokeAttestation | null = null;
+
+  const registryAbi = parseAbi([...pokeAttestationRegistryAbi]);
 
   const short = (value: string) => value ? `${value.slice(0, 8)}…${value.slice(-6)}` : 'None';
   const detailUrl = (id: string) => `https://sepolia.easscan.org/attestation/view/${id}`;
@@ -40,15 +48,46 @@
     loading = true;
     error = '';
     result = null;
+    pokeResult = null;
     try {
+      const localAttestation = await lookupPokeCommitment(uid.trim().toLowerCase());
+      if (localAttestation) {
+        pokeResult = localAttestation;
+        return;
+      }
       const response = await fetch('/api/eas', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ uid }) });
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error);
+      if (!response.ok) throw new Error(`${body.error} If this came from Poké Whistleblow, anchor it first and use the same testnet recorded in its disclosure package.`);
       result = body.attestation;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'EAS lookup failed.';
     } finally {
       loading = false;
+    }
+  }
+
+  async function lookupPokeCommitment(reportHash: string) {
+    if (!/^0x[a-f0-9]{64}$/.test(reportHash)) return null;
+    const ethereum = (window as unknown as { ethereum?: EthereumProvider }).ethereum;
+    if (!ethereum) return null;
+    const chainId = Number.parseInt(String(await ethereum.request({ method: 'eth_chainId' })), 16);
+    const reports = JSON.parse(localStorage.getItem('poke-reports') || '[]') as Array<{ hash?: string; attestation?: { chainId: number; network: string; contract: string; transactionHash: string } }>;
+    const saved = reports.find((report) => report.hash?.toLowerCase() === reportHash);
+    if (saved?.attestation?.chainId && saved.attestation.chainId !== chainId) {
+      throw new Error(`This is a Poké report commitment. Switch MetaMask to ${saved.attestation.network || attestationNetworks[saved.attestation.chainId] || `chain ${saved.attestation.chainId}`} and inspect it again.`);
+    }
+    const configured = env.PUBLIC_ATTESTATION_CONTRACT || '';
+    const stored = localStorage.getItem(`poke-attestation-contract:${chainId}`) || '';
+    const contract = saved?.attestation?.contract || (/^0x[a-fA-F0-9]{40}$/.test(configured) ? configured : stored);
+    if (!/^0x[a-fA-F0-9]{40}$/.test(contract)) return null;
+    try {
+      const data = encodeFunctionData({ abi: registryAbi, functionName: 'attestations', args: [reportHash as `0x${string}`] });
+      const raw = String(await ethereum.request({ method: 'eth_call', params: [{ to: contract, data }, 'latest'] })) as `0x${string}`;
+      const [submitter, timestamp, schema] = decodeFunctionResult({ abi: registryAbi, functionName: 'attestations', data: raw });
+      if (timestamp === 0n) return null;
+      return { reportHash, submitter, timestamp: Number(timestamp), schema, contract, chainId, network: attestationNetworks[chainId] || `Chain ${chainId}`, transactionHash: saved?.attestation?.transactionHash } satisfies PokeAttestation;
+    } catch {
+      return null;
     }
   }
 
@@ -74,7 +113,7 @@
     {#if selected.kind === 'eas'}
       <div class="eas-console">
         <section class="eas-intro">
-          <div><span class="eas-network"><i></i> Ethereum Sepolia</span><h3>Attestation intelligence,<br/><em>inside Poké.</em></h3><p>Look up public EAS records without leaving the command center. Results come from the official EAS Sepolia indexer.</p></div>
+          <div><span class="eas-network"><i></i> Ethereum Sepolia</span><h3>Attestation intelligence,<br/><em>inside Poké.</em></h3><p>Inspect official EAS UIDs or Poké whistleblower commitments. Poké commitments are verified against their deployed testnet registry; official UIDs use the EAS Sepolia indexer.</p></div>
           <div class="eas-actions">
             <a href="https://sepolia.easscan.org/attestation/create" target="_blank" rel="noopener noreferrer"><span>＋</span><strong>Make attestation</strong><small>Open official EAS flow ↗</small></a>
             <a href="https://sepolia.easscan.org/schemas/explore" target="_blank" rel="noopener noreferrer"><span>⌘</span><strong>Browse schemas</strong><small>Explore Sepolia schemas ↗</small></a>
@@ -83,10 +122,24 @@
         </section>
 
         <form class="eas-search" onsubmit={(event) => { event.preventDefault(); lookup(); }}>
-          <label for="eas-uid">ATTESTATION UID</label>
-          <div><span>⌕</span><input id="eas-uid" bind:value={uid} placeholder="0x… 64-character attestation UID"/><button disabled={loading || !uid.trim()}>{loading ? 'Loading…' : 'Inspect'}</button></div>
+          <label for="eas-uid">EAS UID OR POKÉ REPORT COMMITMENT</label>
+          <div><span>⌕</span><input id="eas-uid" bind:value={uid} placeholder="Paste the complete 0x… UID or report hash"/><button disabled={loading || !uid.trim()}>{loading ? 'Loading…' : 'Inspect'}</button></div>
           {#if error}<p>{error}</p>{/if}
         </form>
+
+        {#if pokeResult}
+          <section class="eas-result">
+            <div class="eas-section-title"><div><span class="status ok">VERIFIED POKÉ REGISTRY RECORD</span><h3>Whistleblower commitment</h3></div>{#if pokeResult.transactionHash}<code>{short(pokeResult.transactionHash)}</code>{/if}</div>
+            <div class="eas-detail-grid">
+              <div><small>REPORT COMMITMENT</small><code>{pokeResult.reportHash}</code></div>
+              <div><small>STATUS</small><strong>Anchored</strong></div>
+              <div><small>SUBMITTER</small><code>{pokeResult.submitter}</code></div>
+              <div><small>BLOCKCHAIN TIMESTAMP</small><strong>{new Date(pokeResult.timestamp * 1000).toLocaleString()}</strong></div>
+              <div><small>NETWORK</small><strong>{pokeResult.network} · {pokeResult.chainId}</strong></div>
+              <div><small>REGISTRY CONTRACT</small><code>{pokeResult.contract}</code></div>
+            </div>
+          </section>
+        {/if}
 
         {#if result}
           <section class="eas-result">

@@ -1,6 +1,7 @@
 export const pokeAttestationRegistryAbi = [
   'function attest(bytes32 reportHash, bytes32 schema)',
-  'function verify(bytes32 reportHash) view returns (bool)'
+  'function verify(bytes32 reportHash) view returns (bool)',
+  'function attestations(bytes32 reportHash) view returns (address submitter, uint64 timestamp, bytes32 schema)'
 ] as const;
 
 // Compiled from contracts/src/PokeAttestationRegistry.sol with solc 0.8.24
