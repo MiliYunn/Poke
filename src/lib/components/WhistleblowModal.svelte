@@ -3,6 +3,7 @@
   import { env } from '$env/dynamic/public';
   import { encodeFunctionData, parseAbi } from 'viem';
   import { extractPdfText } from '$lib/client/pdf';
+  import { attestationNetworks, pokeAttestationRegistryAbi, pokeAttestationRegistryBytecode } from '$lib/contracts/pokeAttestationRegistry';
 
   export let open = false;
 
@@ -10,6 +11,8 @@
   type Evidence = { id: string; name: string; size: number; type: string; hash: string; data: string; text?: string; extraction: 'text' | 'no-text' | 'binary' | 'failed' };
   type Quota = { plan: 'free' | 'premium'; used: number; limit: number; remaining: number; blocked: boolean };
   type RiskAnalysis = { truthScore: number; riskLevel: string; confidence: string; scamType: string; summary: string; evidence: string[]; missingInformation: string[] };
+  type EthereumProvider = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> };
+  type TransactionReceipt = { status?: string; contractAddress?: string };
 
   let user: User | null = null;
   let report = '';
@@ -30,8 +33,14 @@
   let wasOpen = false;
   let riskAnalysis: RiskAnalysis | null = null;
   let processingEvidence = false;
+  let registryAddress = '';
+  let registryNetwork = '';
+  let registryChainId = 0;
+  let deploymentTxHash = '';
+  let deployingRegistry = false;
 
-  const abi = parseAbi(['function attest(bytes32 reportHash, bytes32 schema)', 'function verify(bytes32 reportHash) view returns (bool)']);
+  const abi = parseAbi([...pokeAttestationRegistryAbi]);
+  const addressPattern = /^0x[a-fA-F0-9]{40}$/;
   const zeroHash = `0x${'0'.repeat(64)}` as `0x${string}`;
   const hex = (buffer: ArrayBuffer) => '0x' + [...new Uint8Array(buffer)].map((x) => x.toString(16).padStart(2, '0')).join('');
   const b64 = (bytes: Uint8Array) => {
@@ -43,6 +52,45 @@
   function syncQuota(next: Quota) {
     quota = next;
     localStorage.setItem('poke-report-usage', String(next.used));
+  }
+
+  const provider = () => (window as unknown as { ethereum?: EthereumProvider }).ethereum;
+  const registryStorageKey = (chainId: number) => `poke-attestation-contract:${chainId}`;
+
+  async function currentNetwork(ethereum: EthereumProvider) {
+    const chainId = Number.parseInt(String(await ethereum.request({ method: 'eth_chainId' })), 16);
+    return { chainId, name: attestationNetworks[chainId] || `Unsupported chain ${chainId}` };
+  }
+
+  async function waitForReceipt(ethereum: EthereumProvider, transactionHash: string) {
+    let receipt: TransactionReceipt | null = null;
+    for (let attempt = 0; attempt < 120 && !receipt; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      receipt = await ethereum.request({ method: 'eth_getTransactionReceipt', params: [transactionHash] }) as TransactionReceipt | null;
+    }
+    return receipt;
+  }
+
+  async function loadRegistryAddress() {
+    const configured = env.PUBLIC_ATTESTATION_CONTRACT || '';
+    const ethereum = provider();
+    const network = ethereum ? await currentNetwork(ethereum) : null;
+    if (addressPattern.test(configured)) {
+      registryAddress = configured;
+      registryNetwork = network?.name || 'configured testnet';
+      registryChainId = network?.chainId || 0;
+      return configured;
+    }
+    if (!ethereum || !network) {
+      registryAddress = '';
+      registryNetwork = '';
+      registryChainId = 0;
+      return '';
+    }
+    registryNetwork = network.name;
+    registryChainId = network.chainId;
+    registryAddress = localStorage.getItem(registryStorageKey(network.chainId)) || '';
+    return addressPattern.test(registryAddress) ? registryAddress : '';
   }
 
   async function refresh() {
@@ -59,6 +107,7 @@
   async function refreshAndLoadQuota() {
     await refresh();
     if (user) await loadQuota();
+    await loadRegistryAddress().catch(() => { registryAddress = ''; });
   }
 
   function resetForm() {
@@ -93,6 +142,17 @@
     version: 1,
     report: report.trim(),
     evidence: evidenceFiles.map(({ name, size, type, hash }) => ({ name, size, type, sha256: hash }))
+  });
+
+  const disclosurePackage = () => JSON.stringify({
+    version: 2,
+    commitment: JSON.parse(commitment()),
+    attestation: registryAddress ? {
+      chainId: registryChainId || null,
+      network: registryNetwork || null,
+      contract: registryAddress,
+      transactionHash: txHash || null
+    } : null
   });
 
   async function addEvidence(event: Event) {
@@ -228,18 +288,61 @@
     }
   }
 
+  async function deployRegistry() {
+    await refresh();
+    const ethereum = provider();
+    if (!user) {
+      error = 'Sign in with your wallet before deploying the testnet registry.';
+      return;
+    }
+    if (!ethereum) {
+      error = 'MetaMask is required to deploy the testnet registry.';
+      return;
+    }
+
+    busy = true;
+    deployingRegistry = true;
+    error = '';
+    disclosureStatus = '';
+    try {
+      const network = await currentNetwork(ethereum);
+      if (!attestationNetworks[network.chainId]) {
+        throw new Error('Switch MetaMask to Ethereum Sepolia, Base Sepolia, or Polygon Amoy first.');
+      }
+      const accounts = await ethereum.request({ method: 'eth_requestAccounts' }) as string[];
+      if (accounts[0]?.toLowerCase() !== user.wallet.toLowerCase()) {
+        throw new Error('Use the same MetaMask wallet that signed in to Poké.');
+      }
+      deploymentTxHash = String(await ethereum.request({
+        method: 'eth_sendTransaction',
+        params: [{ from: accounts[0], data: pokeAttestationRegistryBytecode }]
+      }));
+
+      const receipt = await waitForReceipt(ethereum, deploymentTxHash);
+      if (!receipt) throw new Error('Registry deployment is still pending. Wait for confirmation in MetaMask, then reopen this panel.');
+      if (receipt.status === '0x0') throw new Error('Registry deployment reverted on the selected testnet.');
+      if (!addressPattern.test(receipt.contractAddress || '')) throw new Error('The deployment receipt did not contain a registry address.');
+
+      registryAddress = receipt.contractAddress as string;
+      registryNetwork = network.name;
+      registryChainId = network.chainId;
+      localStorage.setItem(registryStorageKey(network.chainId), registryAddress);
+      disclosureStatus = `Registry deployed on ${network.name}. You can now anchor this report hash.`;
+    } catch (caught) {
+      error = caught instanceof Error ? caught.message : 'Could not deploy the testnet registry.';
+    } finally {
+      deployingRegistry = false;
+      busy = false;
+    }
+  }
+
   async function anchor() {
     await refresh();
     if (!user || !reportHash) {
       error = 'Sign in and generate the proof first.';
       return;
     }
-    const contract = env.PUBLIC_ATTESTATION_CONTRACT;
-    if (!/^0x[a-fA-F0-9]{40}$/.test(contract || '')) {
-      error = 'Set PUBLIC_ATTESTATION_CONTRACT after deploying the registry contract.';
-      return;
-    }
-    const ethereum = (window as unknown as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } }).ethereum;
+    const ethereum = provider();
     if (!ethereum) {
       error = 'MetaMask is required to anchor the proof.';
       return;
@@ -247,10 +350,19 @@
     busy = true;
     error = '';
     try {
+      const network = await currentNetwork(ethereum);
+      if (!attestationNetworks[network.chainId]) throw new Error('Switch MetaMask to Ethereum Sepolia, Base Sepolia, or Polygon Amoy first.');
+      const contract = await loadRegistryAddress();
+      if (!contract) throw new Error('Deploy the testnet registry first, then anchor the report hash.');
       const accounts = await ethereum.request({ method: 'eth_requestAccounts' }) as string[];
       if (accounts[0]?.toLowerCase() !== user.wallet.toLowerCase()) throw new Error('Use the same wallet that signed in to Poké.');
       const data = encodeFunctionData({ abi, functionName: 'attest', args: [reportHash as `0x${string}`, zeroHash] });
       txHash = String(await ethereum.request({ method: 'eth_sendTransaction', params: [{ from: accounts[0], to: contract, data }] }));
+      disclosureStatus = `Attestation submitted on ${network.name}. Waiting for testnet confirmation…`;
+      const receipt = await waitForReceipt(ethereum, txHash);
+      if (!receipt) throw new Error('Attestation is still pending. Check the transaction hash in the testnet explorer.');
+      if (receipt.status === '0x0') throw new Error('The attestation transaction reverted on the selected testnet.');
+      disclosureStatus = `Hash anchored and confirmed on ${network.name}. Keep the transaction hash with the disclosure package.`;
     } catch (caught) {
       error = caught instanceof Error ? caught.message : 'Attestation transaction failed.';
     } finally {
@@ -259,7 +371,7 @@
   }
 
   async function copyDisclosure() {
-    const packageText = commitment();
+    const packageText = disclosurePackage();
     disclosure = packageText;
     expectedHash = reportHash;
     verifyResult = '';
@@ -275,7 +387,7 @@
   }
 
   function downloadDisclosure() {
-    const packageText = commitment();
+    const packageText = disclosurePackage();
     disclosure = packageText;
     expectedHash = reportHash;
     verifierOpen = true;
@@ -293,18 +405,27 @@
     error = '';
     try {
       const parsed = JSON.parse(disclosure);
-      const canonical = JSON.stringify(parsed);
+      const disclosedCommitment = parsed?.version === 2 && parsed.commitment ? parsed.commitment : parsed;
+      const canonical = JSON.stringify(disclosedCommitment);
       const actual = hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical)));
       if (actual.toLowerCase() !== expectedHash.trim().toLowerCase()) {
         verifyResult = `Mismatch — recomputed ${actual}`;
         return;
       }
       let chain = 'Hash matches the disclosed package.';
-      if (/^0x[a-fA-F0-9]{40}$/.test(env.PUBLIC_ATTESTATION_CONTRACT || '')) {
-        const ethereum = (window as unknown as { ethereum?: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> } }).ethereum;
-        if (ethereum) {
+      const ethereum = provider();
+      if (ethereum) {
+        const network = await currentNetwork(ethereum);
+        const disclosedContract = String(parsed?.attestation?.contract || '');
+        const disclosedChainId = Number(parsed?.attestation?.chainId) || 0;
+        if (disclosedChainId && disclosedChainId !== network.chainId) {
+          verifyResult = `${chain} Switch MetaMask to ${attestationNetworks[disclosedChainId] || `chain ${disclosedChainId}`} to check its on-chain attestation.`;
+          return;
+        }
+        const contract = addressPattern.test(disclosedContract) ? disclosedContract : await loadRegistryAddress();
+        if (contract) {
           const data = encodeFunctionData({ abi, functionName: 'verify', args: [actual as `0x${string}`] });
-          const result = String(await ethereum.request({ method: 'eth_call', params: [{ to: env.PUBLIC_ATTESTATION_CONTRACT, data }, 'latest'] }));
+          const result = String(await ethereum.request({ method: 'eth_call', params: [{ to: contract, data }, 'latest'] }));
           chain += result.endsWith('1') ? ' On-chain attestation found.' : ' No on-chain attestation found on the connected network.';
         }
       }
@@ -379,12 +500,25 @@
           </div>
         {/if}
         <button class="full primary" onclick={save} disabled={saved || busy}>{saved ? 'Encrypted proof saved' : 'Encrypt and save off-chain'}</button>
-        <button class="full primary" onclick={anchor} disabled={busy}>{txHash ? 'Attestation submitted' : 'Anchor hash on testnet'}</button>
+        {#if registryAddress}
+          <div class="hash registry-ready">
+            <small>ATTESTATION REGISTRY · {registryNetwork}</small>
+            <code>{registryAddress}</code>
+          </div>
+          <button class="full primary" onclick={anchor} disabled={busy || Boolean(txHash)}>{txHash ? 'Hash anchored on testnet' : 'Anchor hash on testnet'}</button>
+        {:else}
+          <p class="quota-note">A registry contract is required once per testnet. Deploying uses testnet gas and requires MetaMask confirmation; your report content is never included.</p>
+          <button class="full primary" onclick={deployRegistry} disabled={busy}>
+            {deployingRegistry ? 'Deploying registry — waiting for confirmation…' : 'Deploy testnet registry (one time)'}
+          </button>
+          <button class="full" disabled>Anchor hash on testnet · deploy registry first</button>
+        {/if}
         <button class="full primary" onclick={copyDisclosure}>Copy disclosure JSON</button>
         <button class="full" onclick={downloadDisclosure}>Download disclosure JSON</button>
         {#if disclosureStatus}<p class="disclosure-status" aria-live="polite">{disclosureStatus}</p>{/if}
       {/if}
 
+      {#if deploymentTxHash}<div class="hash"><small>Registry deployment transaction</small><code>{deploymentTxHash}</code></div>{/if}
       {#if txHash}<div class="hash"><small>Attestation transaction</small><code>{txHash}</code></div>{/if}
 
       <details bind:open={verifierOpen}>
