@@ -23,6 +23,8 @@
   let disclosure = '';
   let expectedHash = '';
   let verifyResult = '';
+  let disclosureStatus = '';
+  let verifierOpen = false;
   let recoveryKey = '';
   let attemptConsumed = false;
   let wasOpen = false;
@@ -69,6 +71,7 @@
     attemptConsumed = false;
     riskAnalysis = null;
     error = '';
+    disclosureStatus = '';
   }
 
   function closeModal() {
@@ -255,6 +258,36 @@
     }
   }
 
+  async function copyDisclosure() {
+    const packageText = commitment();
+    disclosure = packageText;
+    expectedHash = reportHash;
+    verifyResult = '';
+    verifierOpen = true;
+
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
+      await navigator.clipboard.writeText(packageText);
+      disclosureStatus = 'Disclosure JSON copied. It is also shown in the verification section below.';
+    } catch {
+      disclosureStatus = 'Browser clipboard access was unavailable. The JSON is shown below so you can copy it manually.';
+    }
+  }
+
+  function downloadDisclosure() {
+    const packageText = commitment();
+    disclosure = packageText;
+    expectedHash = reportHash;
+    verifierOpen = true;
+    const url = URL.createObjectURL(new Blob([packageText], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `poke-disclosure-${reportHash.slice(2, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    disclosureStatus = 'Disclosure JSON downloaded and loaded into the verification section.';
+  }
+
   async function verifyDisclosure() {
     verifyResult = '';
     error = '';
@@ -347,13 +380,16 @@
         {/if}
         <button class="full primary" onclick={save} disabled={saved || busy}>{saved ? 'Encrypted proof saved' : 'Encrypt and save off-chain'}</button>
         <button class="full primary" onclick={anchor} disabled={busy}>{txHash ? 'Attestation submitted' : 'Anchor hash on testnet'}</button>
-        <button class="full" onclick={() => navigator.clipboard.writeText(commitment())}>Copy disclosure package</button>
+        <button class="full primary" onclick={copyDisclosure}>Copy disclosure JSON</button>
+        <button class="full" onclick={downloadDisclosure}>Download disclosure JSON</button>
+        {#if disclosureStatus}<p class="disclosure-status" aria-live="polite">{disclosureStatus}</p>{/if}
       {/if}
 
       {#if txHash}<div class="hash"><small>Attestation transaction</small><code>{txHash}</code></div>{/if}
 
-      <details>
+      <details bind:open={verifierOpen}>
         <summary>Verify a disclosed report</summary>
+        <p class="quota-note">Use this to prove that disclosed report content and evidence hashes still match the original commitment. Preparing your own package fills both fields automatically.</p>
         <label for="expected-hash">Expected report hash</label>
         <input id="expected-hash" bind:value={expectedHash} placeholder="0x…"/>
         <label for="disclosure">Disclosure JSON package</label>
