@@ -1,6 +1,5 @@
 # Poké — Web3 command center powered by Gonka
 
-Poké is an independently implemented SvelteKit Web3 command center. It combines cross-chain portfolio and explorer tools, evidence-first scam analysis, whistleblower integrity proofs, and a context-aware assistant. Blockhead was used only as a product-scope reference; no source code was copied or reused.
 
 ## Local setup
 
