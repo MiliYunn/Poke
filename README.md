@@ -62,3 +62,7 @@ Wallet authentication asks MetaMask for the selected address, creates a five-min
 - Chatbot Corner persists across routes, streams its user-facing response, can call Poké's portfolio service for supplied addresses, and displays model/Request-ID provenance.
 
 Deploy `contracts/src/PokeAttestationRegistry.sol` to one supported testnet and set `PUBLIC_ATTESTATION_CONTRACT` before testing on-chain anchoring. The contract address is intentionally not invented or committed by the app.
+
+## Whistleblower Verification
+Poké is designed to let whistleblowers report fraud, exploits, and misconduct anonymously, without a centralized platform vouching for their identity. A signed-in wallet can submit a report with supporting evidence. Contents are hashed and encrypted client-side before storage; only the resulting commitment is anchored on-chain via `PokeAttestationRegistry`, giving a tamper-evident timestamp anyone can independently re-verify. The hash proves integrity only — it is never used to infer a report's risk or credibility. The MVP uses wallet-signature rate-limiting rather than full anonymity; Semaphore-based ZK group membership is planned for Phase 2 to enable true anonymous, Sybil-resistant reporting.
+
